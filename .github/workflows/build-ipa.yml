@@ -7,15 +7,18 @@ on:
 
 jobs:
   build:
-    runs-on: macos-26-intel
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-26, macos-26-intel]
+
     steps:
       - uses: actions/checkout@v5
 
       - name: Select latest Xcode
         run: |
-          echo "Default: $(xcode-select -p)"
-          ls -d /Applications/Xcode*.app 2>/dev/null || true
           XC=""
           for x in $(ls -d /Applications/Xcode*.app 2>/dev/null | sort -rV); do
             if [ -x "$x/usr/bin/xcodebuild" ]; then XC="$x"; break; fi
@@ -29,48 +32,73 @@ jobs:
       - name: Build (unsigned, OPENSOURCE_UNLOCKED)
         run: |
           cd "apps/ios/Orange Cloud"
-          set -o pipefail
-          xcodebuild \
-            -project "Orange Cloud.xcodeproj" \
-            -scheme "Orange Cloud" \
-            -configuration Release \
-            -destination "generic/platform=iOS" \
-            -derivedDataPath "$GITHUB_WORKSPACE/build" \
-            COMPILER_INDEX_STORE_ENABLE=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            'SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) OPENSOURCE_UNLOCKED' \
-            build 2>&1 | tee build.log | grep -E "error:|warning: .*(deprecated|unavailable)|BUILD (SUCCEEDED|FAILED)|Resolve (Product|Package)" | tail -50
+          xcodebuild -version
+          build() {
+            set -o pipefail
+            xcodebuild \
+              -project "Orange Cloud.xcodeproj" \
+              -scheme "Orange Cloud" \
+              -configuration Release \
+              -destination "generic/platform=iOS" \
+              -derivedDataPath "$GITHUB_WORKSPACE/build" \
+              COMPILER_INDEX_STORE_ENABLE=NO \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              'SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) OPENSOURCE_UNLOCKED' \
+              "$@" build > "$GITHUB_WORKSPACE/build.log" 2>&1
+            local rc=$?
+            set +o pipefail
+            echo "exit=$rc mode=$1"
+            if [ $rc -ne 0 ]; then
+              grep -E "error:" "$GITHUB_WORKSPACE/build.log" | head -20 || true
+            fi
+            return $rc
+          }
+
+          # Attempt 1: default Release (wholemodule). If Swift type-checker
+          # times out (slow Intel runners hit this on big SwiftUI bodies),
+          # degrade the compilation mode instead of patching upstream source.
+          if build; then exit 0; fi
+          grep -q "unable to type-check" "$GITHUB_WORKSPACE/build.log" || {
+            echo "non-type-check failure, aborting"; tail -40 "$GITHUB_WORKSPACE/build.log"; exit 1; }
+
+          echo "::warning::wholemodule type-check timeout, retrying singlefile"
+          rm -rf "$GITHUB_WORKSPACE/build"
+          if build SWIFT_COMPILATION_MODE=singlefile; then exit 0; fi
+
+          echo "::warning::still failing, retrying singlefile + Onone"
+          rm -rf "$GITHUB_WORKSPACE/build"
+          if build SWIFT_COMPILATION_MODE=singlefile SWIFT_OPTIMIZATION_LEVEL="-Onone"; then exit 0; fi
+
+          echo "all attempts failed"; tail -40 "$GITHUB_WORKSPACE/build.log"; exit 1
 
       - name: Package IPA (full + no-watch)
         run: |
           APP="$GITHUB_WORKSPACE/build/Build/Products/Release-iphoneos/Orange Cloud.app"
           test -d "$APP" || { echo "app not found"; exit 1; }
 
+          if [ "${{ matrix.runner }}" = "macos-26" ]; then SUFFIX=arm64; else SUFFIX=x64; fi
+
           mkdir -p Payload
           cp -R "$APP" Payload/
 
           VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "Payload/Orange Cloud.app/Info.plist")
-          echo "App version: $VERSION"
-          echo "IPA_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "App version: $VERSION / runner: ${{ matrix.runner }}"
 
-          # full IPA (watch app embedded)
-          zip -qr "orange-cloud-${VERSION}-full.ipa" Payload
+          zip -qr "orange-cloud-${VERSION}-${SUFFIX}-full.ipa" Payload
 
-          # slim IPA (watch app stripped, easier to sideload on iPhone-only)
           rm -rf Payload
           mkdir -p Payload
           cp -R "$APP" Payload/
           find "Payload/Orange Cloud.app" -maxdepth 1 -type d -name "Watch" -exec rm -rf {} +
-          zip -qr "orange-cloud-${VERSION}-slim.ipa" Payload
+          zip -qr "orange-cloud-${VERSION}-${SUFFIX}-slim.ipa" Payload
 
           ls -lh *.ipa
-          du -sh "Payload/Orange Cloud.app"
 
       - name: Upload IPAs
         uses: actions/upload-artifact@v4
         with:
-          name: orange-cloud-ipa
+          name: orange-cloud-ipa-${{ matrix.runner }}
           path: |
             orange-cloud-*-full.ipa
             orange-cloud-*-slim.ipa
