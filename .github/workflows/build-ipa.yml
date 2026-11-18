@@ -7,12 +7,8 @@ on:
 
 jobs:
   build:
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-26-intel
     timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [macos-26, macos-26-intel]
 
     steps:
       - uses: actions/checkout@v5
@@ -45,6 +41,7 @@ jobs:
               CODE_SIGNING_ALLOWED=NO \
               CODE_SIGNING_REQUIRED=NO \
               'SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) OPENSOURCE_UNLOCKED' \
+              'OTHER_SWIFT_FLAGS=$(inherited) -Xfrontend -solver-expression-time-threshold=0' \
               "$@" build > "$GITHUB_WORKSPACE/build.log" 2>&1
             local rc=$?
             set +o pipefail
@@ -77,13 +74,13 @@ jobs:
           APP="$GITHUB_WORKSPACE/build/Build/Products/Release-iphoneos/Orange Cloud.app"
           test -d "$APP" || { echo "app not found"; exit 1; }
 
-          if [ "${{ matrix.runner }}" = "macos-26" ]; then SUFFIX=arm64; else SUFFIX=x64; fi
+          SUFFIX=x64
 
           mkdir -p Payload
           cp -R "$APP" Payload/
 
           VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "Payload/Orange Cloud.app/Info.plist")
-          echo "App version: $VERSION / runner: ${{ matrix.runner }}"
+          echo "App version: $VERSION"
 
           zip -qr "orange-cloud-${VERSION}-${SUFFIX}-full.ipa" Payload
 
@@ -98,7 +95,7 @@ jobs:
       - name: Upload IPAs
         uses: actions/upload-artifact@v4
         with:
-          name: orange-cloud-ipa-${{ matrix.runner }}
+          name: orange-cloud-ipa
           path: |
             orange-cloud-*-full.ipa
             orange-cloud-*-slim.ipa
