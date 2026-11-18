@@ -1,0 +1,71 @@
+name: Build unsigned IPA
+
+on:
+  push:
+    branches: [ci-ipa]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Select latest Xcode
+        run: |
+          XC=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          echo "Using $XC"
+          "$XC/usr/bin/xcodebuild" -version
+          echo "DEVELOPER_DIR=$XC" >> "$GITHUB_ENV"
+
+      - name: Build (unsigned, OPENSOURCE_UNLOCKED)
+        run: |
+          cd "apps/ios/Orange Cloud"
+          set -o pipefail
+          xcodebuild \
+            -project "Orange Cloud.xcodeproj" \
+            -scheme "Orange Cloud" \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "$GITHUB_WORKSPACE/build" \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            'SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) OPENSOURCE_UNLOCKED' \
+            build 2>&1 | tee build.log | grep -E "error:|warning: .*(deprecated|unavailable)|BUILD (SUCCEEDED|FAILED)|Resolve (Product|Package)" | tail -50
+
+      - name: Package IPA (full + no-watch)
+        run: |
+          APP="$GITHUB_WORKSPACE/build/Build/Products/Release-iphoneos/Orange Cloud.app"
+          test -d "$APP" || { echo "app not found"; exit 1; }
+
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+
+          VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "Payload/Orange Cloud.app/Info.plist")
+          echo "App version: $VERSION"
+          echo "IPA_VERSION=$VERSION" >> "$GITHUB_ENV"
+
+          # full IPA (watch app embedded)
+          zip -qr "orange-cloud-${VERSION}-full.ipa" Payload
+
+          # slim IPA (watch app stripped, easier to sideload on iPhone-only)
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          find "Payload/Orange Cloud.app" -maxdepth 1 -type d -name "Watch" -exec rm -rf {} +
+          zip -qr "orange-cloud-${VERSION}-slim.ipa" Payload
+
+          ls -lh *.ipa
+          du -sh "Payload/Orange Cloud.app"
+
+      - name: Upload IPAs
+        uses: actions/upload-artifact@v4
+        with:
+          name: orange-cloud-ipa
+          path: |
+            orange-cloud-*-full.ipa
+            orange-cloud-*-slim.ipa
+          if-no-files-found: error
+          retention-days: 90
