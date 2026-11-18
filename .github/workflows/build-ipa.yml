@@ -14,9 +14,16 @@ jobs:
 
       - name: Select latest Xcode
         run: |
-          XC=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          echo "Default: $(xcode-select -p)"
+          ls -d /Applications/Xcode*.app 2>/dev/null || true
+          XC=""
+          for x in $(ls -d /Applications/Xcode*.app 2>/dev/null | sort -rV); do
+            if [ -x "$x/usr/bin/xcodebuild" ]; then XC="$x"; break; fi
+            echo "skipping unusable: $x"
+          done
+          if [ -z "$XC" ]; then XC=$(xcode-select -p); fi
           echo "Using $XC"
-          "$XC/usr/bin/xcodebuild" -version
+          DEVELOPER_DIR="$XC" xcodebuild -version
           echo "DEVELOPER_DIR=$XC" >> "$GITHUB_ENV"
 
       - name: Build (unsigned, OPENSOURCE_UNLOCKED)
